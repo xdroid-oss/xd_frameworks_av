@@ -25,6 +25,7 @@
 #include <utils/Errors.h>
 #include <binder/IInterface.h>
 #include <media/AidlConversion.h>
+#include <media/AppVolume.h>
 #include <media/AudioClient.h>
 #include <media/AudioCommonTypes.h>
 #include <media/DeviceDescriptorBase.h>
@@ -329,6 +330,9 @@ public:
     /* Indicate JAVA services are ready (scheduling, power management ...) */
     virtual status_t systemReady() = 0;
 
+    // Indicate audio policy service is ready
+    virtual status_t audioPolicyReady() = 0;
+
     // Returns the number of frames per audio HAL buffer.
     virtual size_t frameCountHAL(audio_io_handle_t ioHandle) const = 0;
 
@@ -344,6 +348,10 @@ public:
 
     virtual status_t updateSecondaryOutputs(
             const TrackSecondaryOutputsMap& trackSecondaryOutputs) = 0;
+
+    virtual status_t setAppVolume(const String8& packageName, const float value) = 0;
+    virtual status_t setAppMute(const String8& packageName, const bool value) = 0;
+    virtual status_t listAppVolumes(std::vector<media::AppVolume> *vols) = 0;
 };
 
 /**
@@ -432,12 +440,18 @@ public:
     status_t setAudioPortConfig(const struct audio_port_config* config) override;
     audio_hw_sync_t getAudioHwSyncForSession(audio_session_t sessionId) override;
     status_t systemReady() override;
+    status_t audioPolicyReady() override;
+
     size_t frameCountHAL(audio_io_handle_t ioHandle) const override;
     status_t getMicrophones(std::vector<media::MicrophoneInfo>* microphones) override;
     status_t setAudioHalPids(const std::vector<pid_t>& pids) override;
     status_t setVibratorInfos(const std::vector<media::AudioVibratorInfo>& vibratorInfos) override;
     status_t updateSecondaryOutputs(
             const TrackSecondaryOutputsMap& trackSecondaryOutputs) override;
+
+    status_t setAppVolume(const String8& packageName, const float value) override;
+    status_t setAppMute(const String8& packageName, const bool value) override;
+    status_t listAppVolumes(std::vector<media::AppVolume> *vols) override;
 
 private:
     const sp<media::IAudioFlingerService> mDelegate;
@@ -514,6 +528,7 @@ public:
             SET_AUDIO_PORT_CONFIG = media::BnAudioFlingerService::TRANSACTION_setAudioPortConfig,
             GET_AUDIO_HW_SYNC_FOR_SESSION = media::BnAudioFlingerService::TRANSACTION_getAudioHwSyncForSession,
             SYSTEM_READY = media::BnAudioFlingerService::TRANSACTION_systemReady,
+            AUDIO_POLICY_READY = media::BnAudioFlingerService::TRANSACTION_audioPolicyReady,
             FRAME_COUNT_HAL = media::BnAudioFlingerService::TRANSACTION_frameCountHAL,
             GET_MICROPHONES = media::BnAudioFlingerService::TRANSACTION_getMicrophones,
             SET_MASTER_BALANCE = media::BnAudioFlingerService::TRANSACTION_setMasterBalance,
@@ -522,6 +537,9 @@ public:
             SET_AUDIO_HAL_PIDS = media::BnAudioFlingerService::TRANSACTION_setAudioHalPids,
             SET_VIBRATOR_INFOS = media::BnAudioFlingerService::TRANSACTION_setVibratorInfos,
             UPDATE_SECONDARY_OUTPUTS = media::BnAudioFlingerService::TRANSACTION_updateSecondaryOutputs,
+            SET_APP_VOLUME = media::BnAudioFlingerService::TRANSACTION_setAppVolume,
+            SET_APP_MUTE = media::BnAudioFlingerService::TRANSACTION_setAppMute,
+            LIST_APP_VOLUMES = media::BnAudioFlingerService::TRANSACTION_listAppVolumes,
         };
 
         /**
@@ -624,12 +642,17 @@ public:
     Status setAudioPortConfig(const media::AudioPortConfig& config) override;
     Status getAudioHwSyncForSession(int32_t sessionId, int32_t* _aidl_return) override;
     Status systemReady() override;
+    Status audioPolicyReady() override;
     Status frameCountHAL(int32_t ioHandle, int64_t* _aidl_return) override;
     Status getMicrophones(std::vector<media::MicrophoneInfoData>* _aidl_return) override;
     Status setAudioHalPids(const std::vector<int32_t>& pids) override;
     Status setVibratorInfos(const std::vector<media::AudioVibratorInfo>& vibratorInfos) override;
     Status updateSecondaryOutputs(
             const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos) override;
+
+    Status setAppVolume(const std::string& packageName, const float value) override;
+    Status setAppMute(const std::string& packageName, const bool value) override;
+    Status listAppVolumes(std::vector<media::AppVolumeData> *vols) override;
 
 private:
     const sp<AudioFlingerServerAdapter::Delegate> mDelegate;

@@ -64,6 +64,7 @@
 #include <system/audio_effects/effect_ns.h>
 #include <system/audio_effects/effect_aec.h>
 #include <system/audio_effects/effect_hapticgenerator.h>
+#include <system/audio_effects/effect_spatializer.h>
 
 #include <audio_utils/primitives.h>
 
@@ -336,11 +337,11 @@ status_t AudioFlinger::updateSecondaryOutputs(
 }
 
 // getDefaultVibratorInfo_l must be called with AudioFlinger lock held.
-const media::AudioVibratorInfo* AudioFlinger::getDefaultVibratorInfo_l() {
+std::optional<media::AudioVibratorInfo> AudioFlinger::getDefaultVibratorInfo_l() {
     if (mAudioVibratorInfos.empty()) {
-        return nullptr;
+        return {};
     }
-    return &mAudioVibratorInfos.front();
+    return mAudioVibratorInfos.front();
 }
 
 AudioFlinger::~AudioFlinger()
@@ -695,7 +696,7 @@ status_t AudioFlinger::dump(int fd, const Vector<String16>& args)
         // dump all hardware devs
         for (size_t i = 0; i < mAudioHwDevs.size(); i++) {
             sp<DeviceHalInterface> dev = mAudioHwDevs.valueAt(i)->hwDevice();
-            dev->dump(fd);
+            dev->dump(fd, args);
         }
 
         mPatchPanel.dump(fd);
@@ -965,6 +966,15 @@ status_t AudioFlinger::createTrack(const media::CreateTrackRequest& _input,
         output.portId = portId;
 
         if (lStatus == NO_ERROR) {
+
+            // set volume
+            String8 trackCreatorPackage = track->getPackageName();
+            if (!trackCreatorPackage.isEmpty() && mAppVolumeConfigs.find(trackCreatorPackage) != mAppVolumeConfigs.end()) {
+                media::AppVolume config = mAppVolumeConfigs[trackCreatorPackage];
+                track->setAppMute(config.muted);
+                track->setAppVolume(config.volume);
+            }
+
             // Connect secondary outputs. Failure on a secondary output must not imped the primary
             // Any secondary output setup failure will lead to a desync between the AP and AF until
             // the track is destroyed.
@@ -1759,6 +1769,60 @@ uint32_t AudioFlinger::getInputFramesLost(audio_io_handle_t ioHandle) const
     return 0;
 }
 
+status_t AudioFlinger::listAppVolumes(std::vector<media::AppVolume> *vols)
+{
+    std::set<media::AppVolume> volSet;
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
+        sp<PlaybackThread> thread = mPlaybackThreads.valueAt(i);
+        thread->listAppVolumes(volSet);
+    }
+
+    vols->insert(vols->begin(), volSet.begin(), volSet.end());
+
+    return NO_ERROR;
+}
+
+status_t AudioFlinger::setAppVolume(const String8& packageName, const float value)
+{
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
+        sp<PlaybackThread> t = mPlaybackThreads.valueAt(i);
+        t->setAppVolume(packageName, value);
+    }
+
+    if (mAppVolumeConfigs.find(packageName) == mAppVolumeConfigs.end()) {
+        media::AppVolume vol;
+        vol.packageName = packageName;
+        vol.volume = value;
+        vol.muted = false;
+        mAppVolumeConfigs[packageName] = vol;
+    } else {
+        mAppVolumeConfigs[packageName].volume = value;
+    }
+    return NO_ERROR;
+}
+
+status_t AudioFlinger::setAppMute(const String8& packageName, const bool value)
+{
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
+        sp<PlaybackThread> t = mPlaybackThreads.valueAt(i);
+        t->setAppMute(packageName, value);
+    }
+
+    if (mAppVolumeConfigs.find(packageName) == mAppVolumeConfigs.end()) {
+        media::AppVolume vol;
+        vol.packageName = packageName;
+        vol.volume = 1.0f;
+        vol.muted = value;
+        mAppVolumeConfigs[packageName] = vol;
+    } else {
+        mAppVolumeConfigs[packageName].muted = value;
+    }
+    return NO_ERROR;
+}
+
 status_t AudioFlinger::setVoiceVolume(float value)
 {
     status_t ret = initCheck();
@@ -2455,6 +2519,10 @@ status_t AudioFlinger::systemReady()
         ThreadBase *thread = (ThreadBase *)mRecordThreads.valueAt(i).get();
         thread->systemReady();
     }
+    for (size_t i = 0; i < mMmapThreads.size(); i++) {
+        ThreadBase *thread = (ThreadBase *)mMmapThreads.valueAt(i).get();
+        thread->systemReady();
+    }
     return NO_ERROR;
 }
 
@@ -2501,7 +2569,8 @@ void AudioFlinger::setAudioHwSyncForSession_l(PlaybackThread *thread, audio_sess
 
 sp<AudioFlinger::ThreadBase> AudioFlinger::openOutput_l(audio_module_handle_t module,
                                                         audio_io_handle_t *output,
-                                                        audio_config_t *config,
+                                                        audio_config_t *halConfig,
+                                                        audio_config_base_t *mixerConfig __unused,
                                                         audio_devices_t deviceType,
                                                         const String8& address,
                                                         audio_output_flags_t flags)
@@ -2529,16 +2598,16 @@ sp<AudioFlinger::ThreadBase> AudioFlinger::openOutput_l(audio_module_handle_t mo
         // Check only for Normal Mixing mode
         if (kEnableExtendedPrecision) {
             // Specify format (uncomment one below to choose)
-            //config->format = AUDIO_FORMAT_PCM_FLOAT;
-            //config->format = AUDIO_FORMAT_PCM_24_BIT_PACKED;
-            //config->format = AUDIO_FORMAT_PCM_32_BIT;
-            //config->format = AUDIO_FORMAT_PCM_8_24_BIT;
-            // ALOGV("openOutput_l() upgrading format to %#08x", config->format);
+            //halConfig->format = AUDIO_FORMAT_PCM_FLOAT;
+            //halConfig->format = AUDIO_FORMAT_PCM_24_BIT_PACKED;
+            //halConfig->format = AUDIO_FORMAT_PCM_32_BIT;
+            //halConfig->format = AUDIO_FORMAT_PCM_8_24_BIT;
+            // ALOGV("openOutput_l() upgrading format to %#08x", halConfig->format);
         }
         if (kEnableExtendedChannels) {
             // Specify channel mask (uncomment one below to choose)
-            //config->channel_mask = audio_channel_out_mask_from_count(4);  // for USB 4ch
-            //config->channel_mask = audio_channel_mask_from_representation_and_bits(
+            //halConfig->channel_mask = audio_channel_out_mask_from_count(4);  // for USB 4ch
+            //halConfig->channel_mask = audio_channel_mask_from_representation_and_bits(
             //        AUDIO_CHANNEL_REPRESENTATION_INDEX, (1 << 4) - 1);  // another 4ch example
         }
     }
@@ -2549,7 +2618,7 @@ sp<AudioFlinger::ThreadBase> AudioFlinger::openOutput_l(audio_module_handle_t mo
             *output,
             deviceType,
             flags,
-            config,
+            halConfig,
             address.string());
 
     mHardwareStatus = AUDIO_HW_IDLE;
@@ -2564,13 +2633,25 @@ sp<AudioFlinger::ThreadBase> AudioFlinger::openOutput_l(audio_module_handle_t mo
             return thread;
         } else {
             sp<PlaybackThread> thread;
-            if (flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) {
+            //TODO: b/193496180 use spatializer flag at audio HAL when available
+            if (flags == (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_FAST
+                                                    | AUDIO_OUTPUT_FLAG_DEEP_BUFFER)) {
+#ifdef MULTICHANNEL_EFFECT_CHAIN
+                thread = new SpatializerThread(this, outputStream, *output,
+                                                    mSystemReady, mixerConfig);
+                ALOGD("openOutput_l() created spatializer output: ID %d thread %p",
+                      *output, thread.get());
+#else
+                ALOGE("openOutput_l() cannot create spatializer thread "
+                        "without #define MULTICHANNEL_EFFECT_CHAIN");
+#endif
+            } else if (flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) {
                 thread = new OffloadThread(this, outputStream, *output, mSystemReady);
                 ALOGV("openOutput_l() created offload output: ID %d thread %p",
                       *output, thread.get());
             } else if ((flags & AUDIO_OUTPUT_FLAG_DIRECT)
-                    || !isValidPcmSinkFormat(config->format)
-                    || !isValidPcmSinkChannelMask(config->channel_mask)) {
+                    || !isValidPcmSinkFormat(halConfig->format)
+                    || !isValidPcmSinkChannelMask(halConfig->channel_mask)) {
                 thread = new DirectOutputThread(this, outputStream, *output, mSystemReady);
                 ALOGV("openOutput_l() created direct output: ID %d thread %p",
                       *output, thread.get());
@@ -2597,8 +2678,10 @@ status_t AudioFlinger::openOutput(const media::OpenOutputRequest& request,
 {
     audio_module_handle_t module = VALUE_OR_RETURN_STATUS(
             aidl2legacy_int32_t_audio_module_handle_t(request.module));
-    audio_config_t config = VALUE_OR_RETURN_STATUS(
-            aidl2legacy_AudioConfig_audio_config_t(request.config));
+    audio_config_t halConfig = VALUE_OR_RETURN_STATUS(
+            aidl2legacy_AudioConfig_audio_config_t(request.halConfig));
+    audio_config_base_t mixerConfig = VALUE_OR_RETURN_STATUS(
+            aidl2legacy_AudioConfigBase_audio_config_base_t(request.mixerConfig));
     sp<DeviceDescriptorBase> device = VALUE_OR_RETURN_STATUS(
             aidl2legacy_DeviceDescriptorBase(request.device));
     audio_output_flags_t flags = VALUE_OR_RETURN_STATUS(
@@ -2611,9 +2694,9 @@ status_t AudioFlinger::openOutput(const media::OpenOutputRequest& request,
               "Channels %#x, flags %#x",
               this, module,
               device->toString().c_str(),
-              config.sample_rate,
-              config.format,
-              config.channel_mask,
+              halConfig.sample_rate,
+              halConfig.format,
+              halConfig.channel_mask,
               flags);
 
     audio_devices_t deviceType = device->type();
@@ -2625,7 +2708,8 @@ status_t AudioFlinger::openOutput(const media::OpenOutputRequest& request,
 
     Mutex::Autolock _l(mLock);
 
-    sp<ThreadBase> thread = openOutput_l(module, &output, &config, deviceType, address, flags);
+    sp<ThreadBase> thread = openOutput_l(module, &output, &halConfig,
+            &mixerConfig, deviceType, address, flags);
     if (thread != 0) {
         if ((flags & AUDIO_OUTPUT_FLAG_MMAP_NOIRQ) == 0) {
             PlaybackThread *playbackThread = (PlaybackThread *)thread.get();
@@ -2650,7 +2734,8 @@ status_t AudioFlinger::openOutput(const media::OpenOutputRequest& request,
             mmapThread->ioConfigChanged(AUDIO_OUTPUT_OPENED);
         }
         response->output = VALUE_OR_RETURN_STATUS(legacy2aidl_audio_io_handle_t_int32_t(output));
-        response->config = VALUE_OR_RETURN_STATUS(legacy2aidl_audio_config_t_AudioConfig(config));
+        response->config =
+                VALUE_OR_RETURN_STATUS(legacy2aidl_audio_config_t_AudioConfig(halConfig));
         response->latencyMs = VALUE_OR_RETURN_STATUS(convertIntegral<int32_t>(latencyMs));
         response->flags = VALUE_OR_RETURN_STATUS(
                 legacy2aidl_audio_output_flags_t_int32_t_mask(flags));
@@ -3729,6 +3814,15 @@ status_t AudioFlinger::createEffect(const media::CreateEffectRequest& request,
             goto Exit;
         }
 
+        // Only audio policy service can create a spatializer effect
+        if ((memcmp(&descOut.type, FX_IID_SPATIALIZER, sizeof(effect_uuid_t)) == 0) &&
+            (callingUid != AID_AUDIOSERVER || currentPid != getpid())) {
+            ALOGW("%s: attempt to create a spatializer effect from uid/pid %d/%d",
+                    __func__, callingUid, currentPid);
+            lStatus = PERMISSION_DENIED;
+            goto Exit;
+        }
+
         if (io == AUDIO_IO_HANDLE_NONE && sessionId == AUDIO_SESSION_OUTPUT_MIX) {
             // if the output returned by getOutputForEffect() is removed before we lock the
             // mutex below, the call to checkPlaybackThread_l(io) below will detect it
@@ -3744,7 +3838,7 @@ status_t AudioFlinger::createEffect(const media::CreateEffectRequest& request,
             ALOGV("%s device type %#x address %s", __func__, device.mType, device.getAddress());
             handle = mDeviceEffectManager.createEffect_l(
                     &descOut, device, client, effectClient, mPatchPanel.patches_l(),
-                    &enabledOut, &lStatus, probe);
+                    &enabledOut, &lStatus, probe, request.notifyFramesProcessed);
             if (lStatus != NO_ERROR && lStatus != ALREADY_EXISTS) {
                 // remove local strong reference to Client with mClientLock held
                 Mutex::Autolock _cl(mClientLock);
@@ -3797,7 +3891,8 @@ status_t AudioFlinger::createEffect(const media::CreateEffectRequest& request,
                 io = mPlaybackThreads.keyAt(0);
             }
             ALOGV("createEffect() got io %d for effect %s", io, descOut.name);
-        } else if (checkPlaybackThread_l(io) != nullptr) {
+        } else if (checkPlaybackThread_l(io) != nullptr
+                        && sessionId != AUDIO_SESSION_OUTPUT_STAGE) {
             // allow only one effect chain per sessionId on mPlaybackThreads.
             for (size_t i = 0; i < mPlaybackThreads.size(); i++) {
                 const audio_io_handle_t checkIo = mPlaybackThreads.keyAt(i);
@@ -3863,7 +3958,8 @@ status_t AudioFlinger::createEffect(const media::CreateEffectRequest& request,
             }
         }
         handle = thread->createEffect_l(client, effectClient, priority, sessionId,
-                                        &descOut, &enabledOut, &lStatus, pinned, probe);
+                                        &descOut, &enabledOut, &lStatus, pinned, probe,
+                                        request.notifyFramesProcessed);
         if (lStatus != NO_ERROR && lStatus != ALREADY_EXISTS) {
             // remove local strong reference to Client with mClientLock held
             Mutex::Autolock _cl(mClientLock);
@@ -4178,6 +4274,7 @@ status_t AudioFlinger::onTransactWrapper(TransactionCode code,
         case TransactionCode::LIST_AUDIO_PATCHES:
         case TransactionCode::SET_AUDIO_PORT_CONFIG:
         case TransactionCode::SET_RECORD_SILENCED:
+        case TransactionCode::AUDIO_POLICY_READY:
             ALOGW("%s: transaction %d received from PID %d",
                   __func__, code, IPCThreadState::self()->getCallingPid());
             // return status only for non void methods
@@ -4205,7 +4302,9 @@ status_t AudioFlinger::onTransactWrapper(TransactionCode code,
         case TransactionCode::SYSTEM_READY:
         case TransactionCode::SET_AUDIO_HAL_PIDS:
         case TransactionCode::SET_VIBRATOR_INFOS:
-        case TransactionCode::UPDATE_SECONDARY_OUTPUTS: {
+        case TransactionCode::UPDATE_SECONDARY_OUTPUTS:
+        case TransactionCode::SET_APP_VOLUME:
+        case TransactionCode::SET_APP_MUTE: {
             if (!isServiceUid(IPCThreadState::self()->getCallingUid())) {
                 ALOGW("%s: transaction %d received from PID %d unauthorized UID %d",
                       __func__, code, IPCThreadState::self()->getCallingPid(),
