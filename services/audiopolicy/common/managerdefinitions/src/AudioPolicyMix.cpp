@@ -151,7 +151,7 @@ void AudioPolicyMixCollection::closeOutput(sp<SwAudioOutputDescriptor> &desc)
 }
 
 status_t AudioPolicyMixCollection::getOutputForAttr(
-        const audio_attributes_t& attributes, uid_t uid,
+        const audio_attributes_t& attributes, const audio_config_base_t& config, uid_t uid,
         audio_output_flags_t flags,
         sp<AudioPolicyMix> &primaryMix,
         std::vector<sp<AudioPolicyMix>> *secondaryMixes)
@@ -177,7 +177,7 @@ status_t AudioPolicyMixCollection::getOutputForAttr(
             continue; // Primary output already found
         }
 
-        switch (mixMatch(policyMix.get(), i, attributes, uid)) {
+        switch (mixMatch(policyMix.get(), i, attributes, config, uid)) {
             case MixMatchStatus::INVALID_MIX:
                 // The mix has contradictory rules, ignore it
                 // TODO: reject invalid mix at registration
@@ -202,7 +202,8 @@ status_t AudioPolicyMixCollection::getOutputForAttr(
 }
 
 AudioPolicyMixCollection::MixMatchStatus AudioPolicyMixCollection::mixMatch(
-        const AudioMix* mix, size_t mixIndex, const audio_attributes_t& attributes, uid_t uid) {
+        const AudioMix* mix, size_t mixIndex, const audio_attributes_t& attributes,
+        const audio_config_base_t& config, uid_t uid) {
 
     if (mix->mMixType == MIX_TYPE_PLAYERS) {
         int userId = (int) multiuser_get_user_id(uid);
